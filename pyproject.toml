@@ -1,0 +1,34 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "gpusched"
+version = "0.3.0"
+description = "VRAM-aware single-node GPU job scheduler: queue shell commands, place them by free GPU memory, and verify declared-vs-actual VRAM per job."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+keywords = ["gpu", "scheduler", "vram", "nvidia", "queue", "cuda"]
+classifiers = [
+    "Environment :: Console",
+    "Intended Audience :: Science/Research",
+    "Operating System :: POSIX :: Linux",
+    "Programming Language :: Python :: 3",
+    "Topic :: System :: Distributed Computing",
+]
+dependencies = []
+
+[project.urls]
+Homepage = "https://github.com/ceruleane/gpusched"
+Issues = "https://github.com/ceruleane/gpusched/issues"
+Changelog = "https://github.com/ceruleane/gpusched/blob/main/CHANGELOG.md"
+
+[project.optional-dependencies]
+dev = ["pytest>=7"]
+
+[project.scripts]
+gpusched = "gpusched.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
