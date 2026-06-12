@@ -21,7 +21,7 @@ import os
 from dataclasses import dataclass, field
 from pathlib import Path
 
-TERMINAL = {"ok", "failed", "timeout", "infeasible", "failed_oom"}
+TERMINAL = {"ok", "failed", "timeout", "infeasible", "failed_oom", "cancelled"}
 
 
 @dataclass
@@ -32,6 +32,9 @@ class JobState:
     status: str = "pending"         # pending | running | <terminal>
     returncode: int | None = None
     next_vram: int | None = None    # bumped declaration for the next attempt
+    running_pgid: int | None = None # set by 'started', cleared by any outcome:
+                                    # nonzero on load => a previous scheduler
+                                    # died mid-run (orphan-detection input)
     peak_mib: dict[str, int] = field(default_factory=dict)
 
     @property
@@ -59,15 +62,23 @@ class Journal:
             st.no = ev.get("no")
             st.command = ev.get("command", "")
             self._next_no = max(self._next_no, (st.no or 0) + 1)
+        elif kind == "started":
+            st.running_pgid = ev.get("pgid")
+            st.status = "running"
+        elif kind == "interrupted":
+            st.running_pgid = None
+            st.status = "pending"
         elif kind == "oom":
             st.attempts = ev.get("attempts", st.attempts + 1)
             st.next_vram = ev.get("next_vram", st.next_vram)
             st.status = "pending"
+            st.running_pgid = None
         elif kind == "done":
             st.attempts += 1
             st.status = ev.get("status", "failed")
             st.returncode = ev.get("returncode")
             st.peak_mib = ev.get("peak_mib", {})
+            st.running_pgid = None
 
     def _append(self, ev: dict) -> None:
         self.path.parent.mkdir(parents=True, exist_ok=True)
@@ -90,6 +101,16 @@ class Journal:
         self._append(ev)
         self._fold(ev)
         return no
+
+    def record_started(self, key: str, pgid: int, gpus: list[int]) -> None:
+        ev = {"key": key, "event": "started", "pgid": pgid, "gpus": gpus}
+        self._append(ev)
+        self._fold(ev)
+
+    def record_interrupted(self, key: str) -> None:
+        ev = {"key": key, "event": "interrupted"}
+        self._append(ev)
+        self._fold(ev)
 
     def record_oom_retry(self, key: str, attempts: int, next_vram: int | None) -> None:
         ev = {"key": key, "event": "oom", "attempts": attempts, "next_vram": next_vram}

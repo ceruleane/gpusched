@@ -91,7 +91,9 @@ class RunningJob:
     util_sum: float = 0.0
     util_n: int = 0
     timed_out: bool = False
+    cancel_requested: bool = False
     killed_at: float | None = None
+    kill_escalated: bool = False
 
     @property
     def label(self) -> str:
@@ -161,6 +163,7 @@ class Scheduler:
             k for k, st in self.journal.states.items() if st.status == "ok"
         }
         self._skip_logged: set[str] = set()
+        self._orphan_warned: set[str] = set()
 
     @property
     def drained(self) -> bool:
@@ -190,6 +193,14 @@ class Scheduler:
                 self._warn(f"jobs file unreadable, keeping previous queue: {e}")
         return self._cached_specs
 
+    @staticmethod
+    def _pgid_alive(pgid: int) -> bool:
+        try:
+            os.killpg(pgid, 0)
+            return True
+        except (ProcessLookupError, PermissionError):
+            return False
+
     def _pending(self, specs: list[JobSpec]) -> list[JobSpec]:
         pending: list[JobSpec] = []
         for spec in specs:
@@ -197,6 +208,24 @@ class Scheduler:
             st = self.journal.state(spec.key)
             if spec.key in self.running:
                 continue
+            if st.running_pgid is not None:
+                # A previous scheduler died mid-run. Never double-launch.
+                if self._pgid_alive(st.running_pgid):
+                    if spec.key not in self._orphan_warned:
+                        self._orphan_warned.add(spec.key)
+                        self._warn(
+                            f"job {no} is still running as an ORPHAN of a previous scheduler "
+                            f"(pgid {st.running_pgid}) — not re-dispatching. Its exit code is "
+                            f"unrecoverable; wait for it or kill it: kill -TERM -{st.running_pgid}"
+                        )
+                    continue
+                self.journal.record_interrupted(spec.key)
+                self._orphan_warned.discard(spec.key)
+                self._log(
+                    f"job {no} was interrupted mid-run by a previous scheduler's death — re-queuing"
+                )
+            if spec.cancel:
+                continue  # handled by _apply_cancellations
             if st.terminal:
                 if spec.key in self._preexisting_ok and spec.key not in self._skip_logged:
                     self._skip_logged.add(spec.key)
@@ -226,9 +255,10 @@ class Scheduler:
 
         self._attribute(snapshot)
         self._check_over_declaration()
-        self._enforce_timeouts()
-        self._reap()
         specs = self._source()
+        self._apply_cancellations(specs)
+        self._enforce_kills()
+        self._reap()
         self._pending_now = self._pending(specs)
         self._dispatch(snapshot, specs)
         self._render_status()
@@ -299,21 +329,57 @@ class Scheduler:
                     f"(+{100 * (rj.peak_mib[gpu] / est - 1):.0f}%) — neighbors may OOM"
                 )
 
+    # ------------------------------------------------------------- cancellation
+    def _apply_cancellations(self, specs: list[JobSpec]) -> None:
+        """`[... cancel]` on a line: stop it if running, never start it if
+        pending. Job identity hashes the command only, so adding the token
+        targets the same job. Removing the token later does NOT resurrect a
+        cancelled job (terminal is terminal, like any completed job)."""
+        now = time.monotonic()
+        for spec in specs:
+            if not spec.cancel:
+                continue
+            no = self.journal.ensure_seen(spec.key, spec.command)
+            rj = self.running.get(spec.key)
+            if rj is not None:
+                if not rj.cancel_requested:
+                    rj.cancel_requested = True
+                    rj.killed_at = now
+                    self._warn(f"{rj.label} CANCELLED by user — SIGTERM to its process group")
+                    self._killpg(rj, signal.SIGTERM)
+                continue
+            st = self.journal.state(spec.key)
+            if st.terminal:
+                continue
+            self._log(f"job {no} cancelled before start: {spec.command}")
+            self.journal.record_done(spec.key, "cancelled", 0, {}, None)
+            self.results.append(JobResult(
+                spec=spec, no=no, gpu_indices=(), returncode=0, peak_mib={},
+                attributed=False, duration_s=0.0, verdict="cancelled",
+            ))
+
     # ------------------------------------------------------------- timeouts
-    def _enforce_timeouts(self) -> None:
+    def _enforce_kills(self) -> None:
+        """Trigger declared timeouts; escalate any pending kill (timeout OR
+        cancel) from SIGTERM to SIGKILL after the grace period."""
         now = time.monotonic()
         for rj in self.running.values():
-            limit = rj.spec.timeout_s
-            if limit is None or rj.proc.poll() is not None:
+            if rj.proc.poll() is not None:
                 continue
-            elapsed = now - rj.started_at
-            if not rj.timed_out and elapsed > limit:
-                rj.timed_out = True
-                rj.killed_at = now
-                self._warn(f"{rj.label} TIMEOUT after {elapsed:.0f}s (limit {limit:.0f}s) — SIGTERM")
-                self._killpg(rj, signal.SIGTERM)
-            elif rj.timed_out and rj.killed_at and now - rj.killed_at > self.opts.kill_grace_s:
-                rj.killed_at = now + 1e9  # only escalate once
+            limit = rj.spec.timeout_s
+            if limit is not None and not rj.timed_out and not rj.cancel_requested:
+                elapsed = now - rj.started_at
+                if elapsed > limit:
+                    rj.timed_out = True
+                    rj.killed_at = now
+                    self._warn(f"{rj.label} TIMEOUT after {elapsed:.0f}s (limit {limit:.0f}s) — SIGTERM")
+                    self._killpg(rj, signal.SIGTERM)
+            if (
+                rj.killed_at is not None
+                and not rj.kill_escalated
+                and now - rj.killed_at > self.opts.kill_grace_s
+            ):
+                rj.kill_escalated = True
                 self._warn(f"{rj.label} did not exit after SIGTERM — SIGKILL")
                 self._killpg(rj, signal.SIGKILL)
 
@@ -334,6 +400,11 @@ class Scheduler:
             self._finalize(rj)
 
     def _finalize(self, rj: RunningJob) -> None:
+        if rj.cancel_requested or rj.timed_out:
+            # The waited-on leader is dead, but a descendant that traps
+            # SIGTERM could linger (e.g. sh forked the real program and only
+            # sh died). Sweep the group so nothing outlives a killed job.
+            self._killpg(rj, signal.SIGKILL)
         rc = rj.proc.returncode
         spec, est = rj.spec, rj.spec.vram_mib
         peak = rj.overall_peak
@@ -342,7 +413,10 @@ class Scheduler:
         st = self.journal.state(spec.key)
 
         # --- OOM retry path (non-terminal) -------------------------------
-        oom = rc != 0 and not rj.timed_out and looks_like_oom(rj.log_path)
+        oom = (
+            rc != 0 and not rj.timed_out and not rj.cancel_requested
+            and looks_like_oom(rj.log_path)
+        )
         retries_allowed = max(spec.retries, self.opts.oom_retries_default)
         attempts = st.attempts + 1
         if oom and attempts <= retries_allowed:
@@ -356,7 +430,9 @@ class Scheduler:
             return
 
         # --- terminal -----------------------------------------------------
-        if rj.timed_out:
+        if rj.cancel_requested:
+            status, verdict = "cancelled", "cancelled"
+        elif rj.timed_out:
             status, verdict = "timeout", "timeout"
         elif oom:
             status, verdict = "failed_oom", "failed_oom"
@@ -373,7 +449,9 @@ class Scheduler:
         else:
             status, verdict = "ok", "ok"
 
-        if rj.timed_out:
+        if rj.cancel_requested:
+            label_status = "CANCELLED"
+        elif rj.timed_out:
             label_status = "TIMEOUT"
         elif oom:
             label_status = f"OOM (exit {rc}, retries exhausted)"
@@ -474,6 +552,7 @@ class Scheduler:
             log_path=log_path, started_at=time.monotonic(),
         )
         self.running[spec.key] = rj
+        self.journal.record_started(spec.key, rj.pgid, list(gpus))
         declared = f", declared {spec.vram_mib} MiB/gpu" if spec.vram_mib else ", undeclared (exclusive idle GPU)"
         done = len(self.results)
         self._log(
@@ -492,9 +571,10 @@ class Scheduler:
             ]
             for rj in sorted(self.running.values(), key=lambda r: r.no):
                 cur = ", ".join(f"gpu{g}:{m}" for g, m in sorted(rj.last_mib.items()))
+                state = " (cancelling…)" if rj.cancel_requested else (" (timing out…)" if rj.timed_out else "")
                 lines.append(
                     f"▶ job {rj.no:<3} gpu[{','.join(map(str, rj.gpu_indices))}] "
-                    f"{time.monotonic() - rj.started_at:5.0f}s  {cur} MiB (peak {rj.overall_peak}) — {rj.spec.command}"
+                    f"{time.monotonic() - rj.started_at:5.0f}s  {cur} MiB (peak {rj.overall_peak}){state} — {rj.spec.command}"
                 )
             for spec in self._pending_now:
                 st = self.journal.state(spec.key)
@@ -503,7 +583,7 @@ class Scheduler:
                 vram = f" vram {spec.vram_mib}" if spec.vram_mib else ""
                 lines.append(f"{mark} job {st.no or '?':<3} pending{vram}{extra} — {spec.command}")
             for r in sorted(self.results, key=lambda r: r.no):
-                mark = "✓" if r.returncode == 0 else "✗"
+                mark = "⊘" if r.verdict == "cancelled" else ("✓" if r.returncode == 0 else "✗")
                 peak = max(r.peak_mib.values(), default=0)
                 lines.append(
                     f"{mark} job {r.no:<3} {r.verdict} (exit {r.returncode}, peak {peak} MiB) — {r.spec.command}"
@@ -555,12 +635,14 @@ class Scheduler:
                 self._killpg(rj, signal.SIGKILL)
 
     def _summarize(self) -> int:
-        failed = [r for r in self.results if r.returncode != 0]
+        cancelled = [r for r in self.results if r.verdict == "cancelled"]
+        failed = [r for r in self.results if r.returncode != 0 and r.verdict != "cancelled"]
         over = [r for r in self.results if r.verdict == "over"]
         under = [r for r in self.results if r.verdict == "under"]
         self._log(
             f"all {len(self.results)} jobs done — "
-            f"{len(self.results) - len(failed)} ok, {len(failed)} failed, "
+            f"{len(self.results) - len(failed) - len(cancelled)} ok, {len(failed)} failed, "
+            f"{len(cancelled)} cancelled, "
             f"{len(over)} under-declared vram, {len(under)} over-declared vram"
         )
         for r in failed:

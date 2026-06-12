@@ -45,6 +45,7 @@ class JobSpec:
     n_gpus: int = 1                 # number of GPUs required
     timeout_s: float | None = None  # walltime before SIGTERM; None = never (opt-in)
     retries: int = 0                # auto-retries on CUDA OOM
+    cancel: bool = False            # user requests this job stopped / not started
     key: str = field(default="", compare=False)   # stable identity (hash#occurrence)
     lineno: int = field(default=0, compare=False)
 
@@ -96,6 +97,7 @@ def parse_line(line: str, lineno: int, index: int) -> JobSpec | None:
     n_gpus = 1
     timeout_s: float | None = None
     retries = 0
+    cancel = False
     command = stripped
 
     if stripped.startswith("[") and not _ATTR_BLOCK.match(stripped):
@@ -110,7 +112,12 @@ def parse_line(line: str, lineno: int, index: int) -> JobSpec | None:
             raise JobSpecError(lineno, "attribute block present but command is empty")
         for token in m.group("attrs").split():
             if "=" not in token:
-                raise JobSpecError(lineno, f"malformed attribute {token!r} (expected key=value)")
+                if token.lower() == "cancel":
+                    cancel = True
+                    continue
+                raise JobSpecError(
+                    lineno, f"malformed attribute {token!r} (expected key=value, or bare 'cancel')"
+                )
             key, _, value = token.partition("=")
             key = key.lower()
             if key == "vram":
@@ -132,10 +139,10 @@ def parse_line(line: str, lineno: int, index: int) -> JobSpec | None:
                 if n_gpus < 1:
                     raise JobSpecError(lineno, f"gpus must be >= 1, got {n_gpus}")
             else:
-                raise JobSpecError(lineno, f"unknown attribute {key!r} (known: vram, gpus, timeout, retries)")
+                raise JobSpecError(lineno, f"unknown attribute {key!r} (known: vram, gpus, timeout, retries, cancel)")
 
     return JobSpec(index=index, command=command, vram_mib=vram_mib, n_gpus=n_gpus,
-                   timeout_s=timeout_s, retries=retries, lineno=lineno)
+                   timeout_s=timeout_s, retries=retries, cancel=cancel, lineno=lineno)
 
 
 def assign_keys(specs: list[JobSpec]) -> list[JobSpec]:

@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.4.0
+- Cancellation: add the bare `cancel` token to a job's attribute block to
+  stop it if running (SIGTERM -> SIGKILL after grace, plus a straggler sweep
+  so TERM-trapping descendants don't outlive the job) or to prevent it from
+  starting if pending. Identity hashes the command text, so the token targets
+  the same job. Reported separately from failures; never consumes OOM
+  retries; does not affect the scheduler exit code. Deleting a running line
+  remains a deliberate no-op.
+- Orphan double-run guard: launches are journaled with their pgid; on
+  restart, a still-alive previous attempt blocks re-dispatch with a clear
+  warning, and a dead one is marked interrupted and re-queued. Closes the
+  silent-corruption case of two copies of one job writing the same outputs.
+
 ## 0.3.0
 - Live-editable queue: the jobs file is user-owned, re-read every poll;
   append / delete / reorder pending lines mid-run. Pending = in-file and

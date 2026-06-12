@@ -1,6 +1,6 @@
 """gpusched — VRAM-aware single-node GPU job scheduler."""
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 from .allocation import AllocOptions
 from .backend import NvidiaSmiBackend

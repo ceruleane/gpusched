@@ -115,6 +115,11 @@ python preprocess.py
 # opt-in walltime: SIGTERM at 2h, SIGKILL +10s. No timeout attribute = runs
 # forever; the scheduler never guesses which long-running jobs are hung.
 [timeout=2h] python flaky_eval.py
+
+# cancel: stops the job if running (SIGTERM, then SIGKILL), or prevents it
+# from ever starting if pending. Add the token to the line; identity is the
+# command text, so the same job is targeted.
+[vram=18G cancel] python train.py --config a.yaml
 ```
 
 `vram` accepts MiB integers or `G`/`GiB` suffixes and is always per GPU.
@@ -187,13 +192,27 @@ running or completed lines do nothing. A malformed mid-edit save is rejected
 with a warning and the last good queue is kept; in-flight jobs are never
 affected.
 
+**Cancelling.** To stop a running job — the loss curve told you the run is
+doomed and the GPU-hours are better spent elsewhere — edit its line to add
+the bare `cancel` token: `[vram=18G] python train.py` becomes
+`[vram=18G cancel] python train.py`. The job's process group gets SIGTERM,
+then SIGKILL after a grace period, with a final sweep so no descendant that
+traps SIGTERM outlives it. On a pending job, `cancel` marks it terminal
+without running. Cancellation is deliberately explicit: **deleting a running
+job's line does nothing** — killing real compute requires typing the word, so
+an accidental save can't destroy a two-day run. A cancellation is your
+decision, so it is reported separately from failures, never consumes OOM
+retries, and does not make the scheduler's exit code nonzero. Removing the
+token later does not resurrect the job (terminal is terminal, like any
+completed job — re-run via a trivial line change or `--fresh`).
+
 Re-running the same command after a crash or Ctrl-C skips everything the
 journal marks done — that is resume. `--fresh` wipes the journal to re-run
 all; to re-run one job, change its line trivially (new identity). `--watch`
 keeps the scheduler alive after the queue drains, waiting for appended lines.
 
 A live board is rendered to `<log_dir>/status.txt` every poll
-(`▶` running, `·` pending, `↻` retrying after OOM, `✓`/`✗` done):
+(`▶` running, `·` pending, `↻` retrying after OOM, `✓`/`✗` done, `⊘` cancelled):
 
 ```
 watch -n2 cat gpusched_logs/status.txt
@@ -236,9 +255,13 @@ watch -n2 cat gpusched_logs/status.txt
 You can also append jobs over ssh without attaching at all — the file is
 re-read every poll. Failure-mode hierarchy, honestly: tmux protects
 everything from SSH drops; the journal protects queue state from scheduler
-death; nothing recovers *tracking* of jobs orphaned by a dead scheduler (they
-keep running in their own sessions, but their exit codes are lost and a
-restarted scheduler treats them as not-done).
+death; and orphans are guarded against double-runs — every launch is recorded
+in the journal with its process-group id, so a restarted scheduler that finds
+a previous attempt **still alive** refuses to re-dispatch it (and tells you
+the pgid to wait out or kill), while a previous attempt that **died with the
+scheduler** is marked interrupted and re-queued automatically. What is still
+genuinely unrecoverable: a live orphan's exit code — the scheduler cannot
+re-attach to a process it didn't spawn.
 
 ## CLI reference
 

@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "gpusched"
-version = "0.3.0"
+version = "0.4.0"
 description = "VRAM-aware single-node GPU job scheduler: queue shell commands, place them by free GPU memory, and verify declared-vs-actual VRAM per job."
 readme = "README.md"
 requires-python = ">=3.10"
