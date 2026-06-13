@@ -18,6 +18,10 @@ $ gpusched jobs.txt --watch -v
 [14:31:44] job 1 finished [OK] in 1774s — peak vram gpu0:17910 MiB | declared 18432 MiB → within ±10% | avg gpu util 96%
 ```
 
+**New here? Read [USAGE.md](USAGE.md)** — a plain-language, start-to-finish
+guide with worked examples and a list of common mistakes. This README is the
+technical reference: design rationale, exact semantics, and limitations.
+
 ## What this is, and what it is not
 
 gpusched is a **single-node, single-user research tool**: roughly a thousand

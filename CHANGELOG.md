@@ -1,6 +1,8 @@
 # Changelog
 
 ## 0.4.0
+- USAGE.md: plain-language onboarding guide (start-to-end walkthrough,
+  every feature, common mistakes) — README stays the technical reference.
 - Cancellation: add the bare `cancel` token to a job's attribute block to
   stop it if running (SIGTERM -> SIGKILL after grace, plus a straggler sweep
   so TERM-trapping descendants don't outlive the job) or to prevent it from
