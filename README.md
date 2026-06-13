@@ -267,7 +267,8 @@ scheduler** is marked interrupted and re-queued automatically. What is still
 genuinely unrecoverable: a live orphan's exit code — the scheduler cannot
 re-attach to a process it didn't spawn.
 
-#   ## Examples
+## Examples
+
 See [examples/](examples/) for a complete, runnable demo: parallel
 hyperparameter sweeps of a small GPT and a DDPM across multiple GPUs,
 with optional Weights & Biases logging.
