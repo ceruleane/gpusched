@@ -3,6 +3,10 @@
 ## 0.4.0
 - USAGE.md: plain-language onboarding guide (start-to-end walkthrough,
   every feature, common mistakes) — README stays the technical reference.
+- USAGE.md quickstart: note that the demo needs the interpreter that has
+  gpusched (derived from the launcher shebang), since a bare `python3`
+  resolves to the system Python under a `uv tool` install — the same
+  absolute-interpreter-path habit as mistake #5.
 - Cancellation: add the bare `cancel` token to a job's attribute block to
   stop it if running (SIGTERM -> SIGKILL after grace, plus a straggler sweep
   so TERM-trapping descendants don't outlive the job) or to prevent it from

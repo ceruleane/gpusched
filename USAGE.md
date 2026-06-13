@@ -38,17 +38,34 @@ working (run it once to check). No other dependencies.
 
 `--sim N` pretends you have N empty 24 GB GPUs, and `gpusched.simjob` is a
 pretend GPU program. This is the safe sandbox for learning every feature in
-this guide:
+this guide.
+
+One thing first, and it's the single most common stumble (see mistake #5):
+the lines below run `python3 -m gpusched.simjob`, and a **bare `python3`
+resolves to the first one on your PATH** — usually the *system* Python,
+which doesn't have gpusched. If you installed with `uv tool install` (the
+recommended way), the package lives in its own sealed environment, so the
+demo must call the interpreter that actually has it. Grab that path once —
+it's the shebang of the `gpusched` launcher itself:
 
 ```
 mkdir demo && cd demo
-cat > jobs.txt << 'EOF'
-[vram=8G]  python3 -m gpusched.simjob --vram 7800 --ramp 1 --hold 3
-[vram=8G]  python3 -m gpusched.simjob --vram 7900 --ramp 1 --hold 3
-[vram=20G] python3 -m gpusched.simjob --vram 19000 --ramp 1 --hold 2
+PY="$(head -1 "$(command -v gpusched)" | sed 's/^#!//')"   # the interpreter that has gpusched
+echo "$PY"                                                  # e.g. /workspace/.local/share/uv/tools/gpusched/bin/python
+
+cat > jobs.txt << EOF
+[vram=8G]  $PY -m gpusched.simjob --vram 7800 --ramp 1 --hold 3
+[vram=8G]  $PY -m gpusched.simjob --vram 7900 --ramp 1 --hold 3
+[vram=20G] $PY -m gpusched.simjob --vram 19000 --ramp 1 --hold 2
 EOF
 gpusched jobs.txt --sim 2 --poll 0.5
 ```
+
+(Note the heredoc is `<< EOF`, *unquoted*, so `$PY` expands into the file.
+If you instead installed gpusched into your active environment with `pip`,
+plain `python3 -m gpusched.simjob` works directly. Real training jobs should
+always use an absolute interpreter path like this — that's mistake #5, and
+the demo is just teaching the habit early.)
 
 Real output:
 
