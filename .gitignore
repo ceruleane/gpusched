@@ -8,3 +8,9 @@ build/
 venv/
 gpusched_logs/
 .DS_Store
+
+# gpusched ML demo: artifacts produced by running the examples
+examples/runs/
+examples/wandb/
+examples/gpusched_logs/
+examples/jobs.txt
